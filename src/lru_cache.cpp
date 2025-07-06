@@ -18,10 +18,12 @@ void LRUCache::put(const std::string& key, const std::string& value) {
         expiry_.erase(last->first);
         map_.erase(last->first);
         items_.pop_back();
+        eviction_count_++;
     }
 }
 
 bool LRUCache::get(const std::string& key, std::string& value) {
+    auto start_time = std::chrono::high_resolution_clock::now();
     auto it = map_.find(key);
     if (it == map_.end()) { misses_++; return false; }
     // TTL check
@@ -30,11 +32,14 @@ bool LRUCache::get(const std::string& key, std::string& value) {
         erase(key);
         expiry_.erase(key);
         misses_++;
+        eviction_count_++;
         return false;
     }
     items_.splice(items_.begin(), items_, it->second);
     value = it->second->second;
     hits_++;
+    auto end_time = std::chrono::high_resolution_clock::now();
+    total_hit_latency_ms_ += std::chrono::duration<double, std::milli>(end_time - start_time).count();
     return true;
 }
 

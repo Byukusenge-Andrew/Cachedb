@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyDB Web Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .response-area {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .spinner {
+            display: none;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4CAF50;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+            }
+            .response-panel {
+                width: 100%;
+                margin-top: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-lg p-6 max-w-4xl w-full">
+        <h1 class="text-3xl font-bold text-gray-800 mb-2">MyDB Web Interface</h1>
+        <p class="text-gray-600 mb-6">Interact with your MyDB C++ server</p>
+
+        <div class="flex flex-row gap-6 container">
+            <!-- Command Inputs -->
+            <div class="flex-1">
+                <!-- SET Command -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">SET Command</h2>
+                    <div class="space-y-3">
+                        <div>
+                            <label for="setKey" class="block text-sm font-medium text-gray-700">Key</label>
+                            <input type="text" id="setKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key" aria-required="true">
+                        </div>
+                        <div>
+                            <label for="setValue" class="block text-sm font-medium text-gray-700">Value</label>
+                            <input type="text" id="setValue" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter value (e.g., 'Hello World!' or '123')" aria-required="true">
+                        </div>
+                        <button onclick="sendCommand('SET')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">SET</button>
+                    </div>
+                </div>
+
+                <!-- GET Command -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">GET Command</h2>
+                    <div class="space-y-3">
+                        <div>
+                            <label for="getKey" class="block text-sm font-medium text-gray-700">Key</label>
+                            <input type="text" id="getKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key" aria-required="true">
+                        </div>
+                        <button onclick="sendCommand('GET')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">GET</button>
+                    </div>
+                </div>
+
+                <!-- DEL Command -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">DEL Command</h2>
+                    <div class="space-y-3">
+                        <div>
+                            <label for="delKey" class="block text-sm font-medium text-gray-700">Key</label>
+                            <input type="text" id="delKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key" aria-required="true">
+                        </div>
+                        <button onclick="sendCommand('DEL')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">DEL</button>
+                    </div>
+                </div>
+
+                <!-- EXPIRE Command -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">EXPIRE Command</h2>
+                    <div class="space-y-3">
+                        <div>
+                            <label for="expireKey" class="block text-sm font-medium text-gray-700">Key</label>
+                            <input type="text" id="expireKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key" aria-required="true">
+                        </div>
+                        <div>
+                            <label for="expireSeconds" class="block text-sm font-medium text-gray-700">Seconds</label>
+                            <input type="number" id="expireSeconds" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter seconds (e.g., 60)" aria-required="true">
+                        </div>
+                        <button onclick="sendCommand('EXPIRE')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">EXPIRE</button>
+                    </div>
+                </div>
+
+                <!-- List Commands -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">List Commands</h2>
+                    <div class="space-y-3">
+                        <!-- LPUSH Command -->
+                        <div>
+                            <label for="lpushKey" class="block text-sm font-medium text-gray-700">LPUSH Key</label>
+                            <input type="text" id="lpushKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <div>
+                            <label for="lpushValue" class="block text-sm font-medium text-gray-700">LPUSH Value</label>
+                            <input type="text" id="lpushValue" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter value">
+                        </div>
+                        <button onclick="sendCommand('LPUSH')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">LPUSH</button>
+
+                        <!-- RPUSH Command -->
+                        <div class="mt-4">
+                            <label for="rpushKey" class="block text-sm font-medium text-gray-700">RPUSH Key</label>
+                            <input type="text" id="rpushKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <div>
+                            <label for="rpushValue" class="block text-sm font-medium text-gray-700">RPUSH Value</label>
+                            <input type="text" id="rpushValue" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter value">
+                        </div>
+                        <button onclick="sendCommand('RPUSH')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">RPUSH</button>
+
+                        <!-- LPOP Command -->
+                        <div class="mt-4">
+                            <label for="lpopKey" class="block text-sm font-medium text-gray-700">LPOP Key</label>
+                            <input type="text" id="lpopKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <button onclick="sendCommand('LPOP')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">LPOP</button>
+
+                        <!-- RPOP Command -->
+                        <div class="mt-4">
+                            <label for="rpopKey" class="block text-sm font-medium text-gray-700">RPOP Key</label>
+                            <input type="text" id="rpopKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <button onclick="sendCommand('RPOP')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">RPOP</button>
+
+                        <!-- LLEN Command -->
+                        <div class="mt-4">
+                            <label for="llenKey" class="block text-sm font-medium text-gray-700">LLEN Key</label>
+                            <input type="text" id="llenKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <button onclick="sendCommand('LLEN')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">LLEN</button>
+                    </div>
+                </div>
+
+                <!-- HyperLogLog Commands -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">HyperLogLog Commands</h2>
+                    <div class="space-y-3">
+                        <!-- HLL.ADD Command -->
+                        <div>
+                            <label for="hllAddKey" class="block text-sm font-medium text-gray-700">HLL.ADD Key</label>
+                            <input type="text" id="hllAddKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <div>
+                            <label for="hllAddValue" class="block text-sm font-medium text-gray-700">HLL.ADD Element</label>
+                            <input type="text" id="hllAddValue" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter element to add">
+                        </div>
+                        <button onclick="sendCommand('HLL.ADD')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">HLL.ADD</button>
+
+                        <!-- HLL.COUNT Command -->
+                        <div class="mt-4">
+                            <label for="hllCountKey" class="block text-sm font-medium text-gray-700">HLL.COUNT Key</label>
+                            <input type="text" id="hllCountKey" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter key">
+                        </div>
+                        <button onclick="sendCommand('HLL.COUNT')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">HLL.COUNT</button>
+                    </div>
+                </div>
+
+                <!-- Pub/Sub Commands -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">Pub/Sub Commands</h2>
+                    <div class="space-y-3">
+                        <!-- SUBSCRIBE Command -->
+                        <div>
+                            <label for="subscribeChannel" class="block text-sm font-medium text-gray-700">SUBSCRIBE Channel</label>
+                            <input type="text" id="subscribeChannel" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter channel name">
+                        </div>
+                        <button onclick="sendCommand('SUBSCRIBE')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">SUBSCRIBE</button>
+
+                        <!-- PUBLISH Command -->
+                        <div class="mt-4">
+                            <label for="publishChannel" class="block text-sm font-medium text-gray-700">PUBLISH Channel</label>
+                            <input type="text" id="publishChannel" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter channel name">
+                        </div>
+                        <div>
+                            <label for="publishMessage" class="block text-sm font-medium text-gray-700">PUBLISH Message</label>
+                            <input type="text" id="publishMessage" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-green-500 focus:border-green-500" placeholder="Enter message to publish">
+                        </div>
+                        <button onclick="sendCommand('PUBLISH')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">PUBLISH</button>
+                    </div>
+                </div>
+
+                <!-- Utility Commands -->
+                <div class="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <h2 class="text-xl font-semibold text-gray-700 mb-3">Utility Commands</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="sendCommand('SAVE')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">SAVE</button>
+                        <button onclick="sendCommand('LOAD')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">LOAD</button>
+                        <button onclick="sendCommand('AI_SUGGEST')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500">AI_SUGGEST</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Response Area -->
+            <div class="response-panel w-1/3 relative">
+                <div class="response-area bg-gray-200 p-4 rounded-lg min-h-[400px] prose prose-sm max-w-none" id="response" role="region" aria-live="polite">
+                    Response: Waiting for command...
+                </div>
+                <div id="spinner" class="spinner absolute top-4 right-4"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function sendCommand(cmd) {
+            const responseDiv = document.getElementById('response');
+            const spinner = document.getElementById('spinner');
+            responseDiv.className = 'response-area bg-gray-200 p-4 rounded-lg min-h-[400px] prose prose-sm max-w-none';
+            responseDiv.innerText = 'Response: Loading...';
+            spinner.style.display = 'block';
+
+            let key = '';
+            let value = '';
+            switch (cmd) {
+                case 'SET':
+                    key = document.getElementById('setKey').value;
+                    value = document.getElementById('setValue').value;
+                    if (!key || !value) {
+                        responseDiv.innerText = 'Response: Key and Value cannot be empty for SET.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'GET':
+                    key = document.getElementById('getKey').value;
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Key cannot be empty for GET.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'DEL':
+                    key = document.getElementById('delKey').value;
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Key cannot be empty for DEL.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'EXPIRE':
+                    key = document.getElementById('expireKey').value;
+                    value = document.getElementById('expireSeconds').value;
+                    if (!key || !value) {
+                        responseDiv.innerText = 'Response: Key and Seconds cannot be empty for EXPIRE.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    if (isNaN(value) || parseInt(value) < 0) {
+                        responseDiv.innerText = 'Response: Seconds must be a non-negative number for EXPIRE.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'LPUSH':
+                    key = document.getElementById('lpushKey').value;
+                    value = document.getElementById('lpushValue').value;
+                    if (!key || !value) {
+                        responseDiv.innerText = 'Response: Key and Value cannot be empty for LPUSH.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'RPUSH':
+                    key = document.getElementById('rpushKey').value;
+                    value = document.getElementById('rpushValue').value;
+                    if (!key || !value) {
+                        responseDiv.innerText = 'Response: Key and Value cannot be empty for RPUSH.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'LPOP':
+                    key = document.getElementById('lpopKey').value;
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Key cannot be empty for LPOP.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'RPOP':
+                    key = document.getElementById('rpopKey').value;
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Key cannot be empty for RPOP.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'LLEN':
+                    key = document.getElementById('llenKey').value;
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Key cannot be empty for LLEN.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'HLL.ADD':
+                    key = document.getElementById('hllAddKey').value;
+                    value = document.getElementById('hllAddValue').value;
+                    if (!key || !value) {
+                        responseDiv.innerText = 'Response: Key and Element cannot be empty for HLL.ADD.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'HLL.COUNT':
+                    key = document.getElementById('hllCountKey').value;
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Key cannot be empty for HLL.COUNT.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'SUBSCRIBE':
+                    key = document.getElementById('subscribeChannel').value; // key is channel
+                    if (!key) {
+                        responseDiv.innerText = 'Response: Channel cannot be empty for SUBSCRIBE.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'PUBLISH':
+                    key = document.getElementById('publishChannel').value; // key is channel
+                    value = document.getElementById('publishMessage').value; // value is message
+                    if (!key || !value) {
+                        responseDiv.innerText = 'Response: Channel and Message cannot be empty for PUBLISH.';
+                        responseDiv.classList.add('text-red-600', 'font-semibold');
+                        spinner.style.display = 'none';
+                        return;
+                    }
+                    break;
+                case 'SAVE':
+                case 'LOAD':
+                case 'AI_SUGGEST':
+                    break;
+                default:
+                    responseDiv.innerText = 'Response: Command not recognized';
+                    responseDiv.classList.add('text-red-600', 'font-semibold');
+            }
+
+            try {
+                const apiResponse = await fetch('/command', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ command: cmd, key: key, value: value }),
+                });
+                const result = await apiResponse.json();
+                if (result.status === 'success') {
+                    let displayText = result.response;
+                    if (cmd === 'AI_SUGGEST') {
+                        try {
+                            const jsonResponse = JSON.parse(result.response);
+                            if (jsonResponse.candidates && jsonResponse.candidates[0]?.content?.parts?.[0]?.text) {
+                                displayText = jsonResponse.candidates[0].content.parts[0].text;
+                                // Truncate to first 1000 characters to prevent UI overload
+                                if (displayText.length > 1000) {
+                                    displayText = displayText.substring(0, 1000) + '... [Truncated]';
+                                }
+                            } else {
+                                displayText = 'Invalid AI_SUGGEST response format: ' + result.response;
+                            }
+                        } catch (e) {
+                            displayText = 'Failed to parse AI_SUGGEST response: ' + result.response;
+                        }
+                    }
+                    responseDiv.innerText = 'Response: ' + displayText;
+                    responseDiv.classList.add('text-green-600', 'font-semibold');
+                } else {
+                    responseDiv.innerText = 'Response: ' + result.message;
+                    responseDiv.classList.add('text-red-600', 'font-semibold');
+                }
+            } catch (error) {
+                responseDiv.innerText = 'Response: Failed to connect to Flask backend: ' + error.message;
+                responseDiv.classList.add('text-red-600', 'font-semibold');
+            } finally {
+                spinner.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
