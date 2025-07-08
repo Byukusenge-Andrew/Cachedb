@@ -1,4 +1,41 @@
-config.json
-db.json
+# Build artifacts
+build/
+*.exe
+*.dll
+*.a
+*.o
+*.obj
+
+# Installer output
+installer_output/
+*.exe
+
+# Database files
 db.aof
-build/ 
+db.json
+
+# Configuration files with sensitive data
+config.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp 
