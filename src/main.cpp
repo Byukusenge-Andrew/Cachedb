@@ -14,8 +14,7 @@ bool is_integer(const std::string& s) {
 }
 
 int main() {
-    // Use the factory function to create the DB instance
-    std::unique_ptr<DB> db(create_db("LRU", 100)); // Default to LRUDB with capacity 100
+    std::unique_ptr<DB> db(new LRUDB(100));
     std::cout << "Welcome to MyDB! Type HELP for commands.\n";
     std::string line;
     while (std::cout << "> " && std::getline(std::cin, line)) {

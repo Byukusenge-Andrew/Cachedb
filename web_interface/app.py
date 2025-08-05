@@ -1,136 +1,137 @@
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash
 import socket
 import sys
+import json
 
 app = Flask(__name__)
-app.secret_key = 'super_secret_key' # Replace with a strong, random key in production
+app.secret_key = 'super_secret_key' 
 
-# Server configuration (should match config.json of your C++ server)
 SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 6379
 
-def send_command_to_db_server(command, password):
+def send_command(command, password):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.connect((SERVER_HOST, SERVER_PORT))
             
-            # Authenticate first
             auth_command = f"AUTH {password}\n"
             sock.sendall(auth_command.encode())
             auth_response = sock.recv(1024).decode().strip()
 
             if auth_response != "+OK":
-                return f"-ERR Authentication failed: {auth_response}"
+                return f"Error: Authentication failed: {auth_response}"
 
-            # Send the actual command
-            full_command = f"{command}\n"
-            sock.sendall(full_command.encode())
+            sock.sendall(f"{command}\n".encode())
             
-            # Receive response
-            response = sock.recv(4096).decode().strip()
-            return response
+            # Simple RESP-like parser
+            response_type = sock.recv(1).decode()
+            if response_type == '+': # Simple String
+                return sock.recv(4096).decode().strip()
+            if response_type == '-': # Error
+                return f"Error: {sock.recv(4096).decode().strip()}"
+            if response_type == '$': # Bulk String
+                length = int(sock.recv(4096).decode().split('\r\n')[0])
+                if length == -1: return None
+                return sock.recv(length + 2).decode().strip()
+            if response_type == '*': # Array
+                count = int(sock.recv(4096).decode().split('\r\n')[0])
+                elements = []
+                for _ in range(count):
+                    # For simplicity, assuming array of bulk strings
+                    sock.recv(1) # $
+                    length = int(sock.recv(4096).decode().split('\r\n')[0])
+                    elements.append(sock.recv(length + 2).decode().strip())
+                return elements
+            return "Error: Unknown response type"
+
     except ConnectionRefusedError:
-        return "-ERR Connection to DB server refused. Is mydb_server.exe running?"
+        return "Error: Connection to DB server refused."
     except Exception as e:
-        return f"-ERR An error occurred: {e}"
+        return f"Error: An error occurred: {e}"
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if 'password' not in session:
+        return redirect(url_for('login'))
+
+    projects = send_command("LIST_PROJECTS", session['password'])
+    if isinstance(projects, str) and projects.startswith("Error:"):
+        flash(projects)
+        projects = []
+    
+    return render_template('index.html', projects=projects)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         password = request.form['password']
-        # Attempt to authenticate with the server
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.connect((SERVER_HOST, SERVER_PORT))
-                auth_command = f"AUTH {password}\n"
-                sock.sendall(auth_command.encode())
-                auth_response = sock.recv(1024).decode().strip()
-
-                if auth_response == "+OK":
-                    session['logged_in'] = True
-                    session['db_password'] = password
-                    flash('Logged in successfully!', 'success')
-                    return redirect(url_for('index'))
-                else:
-                    flash(f'Authentication failed: {auth_response}', 'error')
-        except ConnectionRefusedError:
-            flash("-ERR Connection to DB server refused. Is mydb_server.exe running?", 'error')
-        except Exception as e:
-            flash(f"-ERR An error occurred during login: {e}", 'error')
+        # Test auth
+        response = send_command("LIST_PROJECTS", password) 
+        if isinstance(response, str) and response.startswith("Error:"):
+            flash('Login Failed. ' + response)
+            return redirect(url_for('login'))
+        session['password'] = password
+        return redirect(url_for('index'))
     return render_template('login.html')
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
-    session.pop('db_password', None)
-    flash('You have been logged out.', 'info')
+    session.pop('password', None)
     return redirect(url_for('login'))
 
-@app.route('/')
-def index():
-    if not session.get('logged_in'):
+@app.route('/project/<project_name>')
+def view_project(project_name):
+    if 'password' not in session:
         return redirect(url_for('login'))
-    return render_template('index.html')
-
-@app.route('/command', methods=['POST'])
-def handle_command():
-    if not session.get('logged_in'):
-        return jsonify({"status": "error", "message": "Not authenticated."}), 401
-
-    data = request.json
-    cmd = data.get('command')
-    key = data.get('key', '')
-    value = data.get('value', '')
-
-    full_cmd = ""
-    if cmd == "SET":
-        full_cmd = f'SET {key} "{value}"'
-    elif cmd == "GET":
-        full_cmd = f"GET {key}"
-    elif cmd == "DEL":
-        full_cmd = f"DEL {key}"
-    elif cmd == "EXPIRE":
-        full_cmd = f"EXPIRE {key} {value}" # value here is seconds
-    elif cmd == "LPUSH":
-        full_cmd = f'LPUSH {key} "{value}"'
-    elif cmd == "RPUSH":
-        full_cmd = f'RPUSH {key} "{value}"'
-    elif cmd == "LPOP":
-        full_cmd = f"LPOP {key}"
-    elif cmd == "RPOP":
-        full_cmd = f"RPOP {key}"
-    elif cmd == "LLEN":
-        full_cmd = f"LLEN {key}"
-    elif cmd == "SAVE":
-        full_cmd = "SAVE"
-    elif cmd == "LOAD":
-        full_cmd = "LOAD"
-    elif cmd == "AI_SUGGEST":
-        full_cmd = "AI_SUGGEST"
-    elif cmd == "HLL.ADD":
-        full_cmd = f'HLL.ADD {key} "{value}"'
-    elif cmd == "HLL.COUNT":
-        full_cmd = f"HLL.COUNT {key}"
-    elif cmd == "SUBSCRIBE":
-        full_cmd = f"SUBSCRIBE {key}" # key is channel
-    elif cmd == "PUBLISH":
-        full_cmd = f'PUBLISH {key} "{value}"' # key is channel, value is message
-    else:
-        return jsonify({"status": "error", "message": "Unknown command"}), 400
-
-    password = session.get('db_password')
-    if not password:
-        return jsonify({"status": "error", "message": "No password found in session. Please log in again."}), 401
     
-    response = send_command_to_db_server(full_cmd, password)
+    databases = send_command(f"LIST_DATABASES IN {project_name}", session['password'])
+    if isinstance(databases, str) and databases.startswith("Error:"):
+        flash(databases)
+        databases = []
+
+    return render_template('project.html', project_name=project_name, databases=databases)
+
+@app.route('/project/<project_name>/<db_name>')
+def view_database(project_name, db_name):
+    if 'password' not in session:
+        return redirect(url_for('login'))
+
+    send_command(f"USE {project_name} {db_name}", session['password'])
+    data_str = send_command("GET_ALL", session['password'])
     
-    # Process the response to make it user-friendly
-    if response.startswith('+OK') or response.startswith('"') or response.startswith('(nil)') or response.startswith('This'):
-        return jsonify({"status": "success", "response": response})
-    elif response.startswith('-ERR'):
-        return jsonify({"status": "error", "message": response}), 500
-    else:
-        return jsonify({"status": "success", "response": response}) # Fallback for unexpected but non-error responses
+    data = {}
+    if data_str and not data_str.startswith("Error:"):
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            flash("Error: Could not decode database data.")
+
+    return render_template('database.html', project_name=project_name, db_name=db_name, data=data)
+
+@app.route('/create_project', methods=['POST'])
+def create_project():
+    if 'password' not in session: return redirect(url_for('login'))
+    project_name = request.form['project_name']
+    response = send_command(f"CREATE_PROJECT {project_name}", session['password'])
+    if "Error" in response: flash(response)
+    return redirect(url_for('index'))
+
+@app.route('/create_database/<project_name>', methods=['POST'])
+def create_database(project_name):
+    if 'password' not in session: return redirect(url_for('login'))
+    db_name = request.form['db_name']
+    response = send_command(f"CREATE_DATABASE {db_name} IN {project_name}", session['password'])
+    if "Error" in response: flash(response)
+    return redirect(url_for('view_project', project_name=project_name))
+
+@app.route('/set/<project_name>/<db_name>', methods=['POST'])
+def set_key(project_name, db_name):
+    if 'password' not in session: return redirect(url_for('login'))
+    key = request.form['key']
+    value = request.form['value']
+    send_command(f"USE {project_name} {db_name}", session['password'])
+    send_command(f"SET {key} {value}", session['password'])
+    return redirect(url_for('view_database', project_name=project_name, db_name=db_name))
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000) 

@@ -1,38 +1,15 @@
 #include "db.h"
 #include "lru_cache.h"
 #include "lfu_cache.h"
+#include "enhanced_cache.h"
+#include "data_types.h"
 #include <fstream>
 #include <json.hpp>
 #include <mutex>
 #include <string>
 #include <sstream>
-#include "plusaes.hpp"
-#include "arc_cache.h"
-#include <chrono> // For std::chrono
-#include <iomanip> // For std::put_time
 
 static const char* AOF_FILENAME = "db.aof";
-
-// Encryption/decryption functions
-// static const std::string ENCRYPTION_KEY = "aVeryStrongEncryptionKeyForMyDB12345"; // 32-byte key for AES-256
-
-std::string get_encryption_key() {
-    const char* key = std::getenv("MYDB_ENCRYPTION_KEY");
-    return key ? key : "default_secure_key_32_bytes_long_12345678"; // Default 32-byte key
-}
-
-std::string encrypt_data(const std::string& plaintext, const std::string& key) {
-    std::vector<unsigned char> encrypted(plusaes::get_padded_encrypted_size(plaintext.size()));
-    plusaes::encrypt_ecb((unsigned char*)plaintext.data(), plaintext.size(), (unsigned char*)key.data(), key.size(), &encrypted[0], encrypted.size(), true);
-    return std::string(encrypted.begin(), encrypted.end());
-}
-
-std::string decrypt_data(const std::string& ciphertext, const std::string& key) {
-    std::vector<unsigned char> decrypted(ciphertext.size());
-    unsigned long padded_size = 0;
-    plusaes::decrypt_ecb((unsigned char*)ciphertext.data(), ciphertext.size(), (unsigned char*)key.data(), key.size(), &decrypted[0], decrypted.size(), &padded_size);
-    return std::string(decrypted.begin(), decrypted.begin() + padded_size);
-}
 
 class AOFLogger {
   public:
@@ -40,7 +17,7 @@ class AOFLogger {
         std::ofstream aof(AOF_FILENAME, std::ios::app);
         aof << entry << "\n";
     }
-    static void replay(DB* db) {
+    static void replay(LRUDB* db) {
         std::ifstream aof(AOF_FILENAME);
         std::string line;
         while (std::getline(aof, line)) {
@@ -48,28 +25,311 @@ class AOFLogger {
             std::string cmd, key, value;
             iss >> cmd >> key;
             if (cmd == "SET") {
-                // Replay SET commands, handling potential spaces/quotes properly if present in AOF
-                std::getline(iss >> std::ws, value); 
+                iss >> value;
                 db->set(key, value);
             } else if (cmd == "DEL") {
                 db->del(key);
             }
-            // Note: EXPIRE commands from AOF are currently not replayed. 
-            // This might lead to discrepancies if not addressed in AOF design.
         }
-    }
-    static void clear() {
-        std::ofstream aof(AOF_FILENAME, std::ios::trunc); // Open in truncate mode to clear the file
-        // File is cleared upon opening with std::ios::trunc, no need to write anything.
     }
 };
 
 std::mutex db_mutex;
 
-// LRUDB method implementations
+// Enhanced DB implementation
+EnhancedDB::EnhancedDB(size_t capacity) : cache_(new EnhancedCache(capacity)) {}
+
+void EnhancedDB::set(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    storage_[key] = DataValue(value);
+    cache_->put(key, storage_[key]);
+    AOFLogger::log("SET " + key + " " + value);
+}
+
+bool EnhancedDB::get(const std::string& key, std::string& value) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    DataValue data_value;
+    if (cache_->get(key, data_value)) {
+        if (data_value.type == DataType::STRING) {
+            value = std::get<std::string>(data_value.data);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool EnhancedDB::incr(const std::string& key, int64_t& result) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::incr(storage_, key, result);
+    if (success) {
+        sync_to_cache(key);
+        AOFLogger::log("INCR " + key);
+    }
+    return success;
+}
+
+bool EnhancedDB::decr(const std::string& key, int64_t& result) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::decr(storage_, key, result);
+    if (success) {
+        sync_to_cache(key);
+        AOFLogger::log("DECR " + key);
+    }
+    return success;
+}
+
+bool EnhancedDB::lpush(const std::string& key, const std::vector<std::string>& values) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::lpush(storage_, key, values);
+    if (success) {
+        sync_to_cache(key);
+        std::string vals;
+        for (const auto& v : values) vals += " " + v;
+        AOFLogger::log("LPUSH " + key + vals);
+    }
+    return success;
+}
+
+bool EnhancedDB::rpush(const std::string& key, const std::vector<std::string>& values) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::rpush(storage_, key, values);
+    if (success) {
+        sync_to_cache(key);
+        std::string vals;
+        for (const auto& v : values) vals += " " + v;
+        AOFLogger::log("RPUSH " + key + vals);
+    }
+    return success;
+}
+
+bool EnhancedDB::lpop(const std::string& key, std::string& value) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::lpop(storage_, key, value);
+    if (success) {
+        sync_to_cache(key);
+        AOFLogger::log("LPOP " + key);
+    }
+    return success;
+}
+
+bool EnhancedDB::rpop(const std::string& key, std::string& value) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::rpop(storage_, key, value);
+    if (success) {
+        sync_to_cache(key);
+        AOFLogger::log("RPOP " + key);
+    }
+    return success;
+}
+
+bool EnhancedDB::llen(const std::string& key, size_t& length) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::llen(storage_, key, length);
+}
+
+bool EnhancedDB::lrange(const std::string& key, int start, int stop, std::vector<std::string>& result) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::lrange(storage_, key, start, stop, result);
+}
+
+bool EnhancedDB::sadd(const std::string& key, const std::vector<std::string>& members) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::sadd(storage_, key, members);
+    if (success) {
+        sync_to_cache(key);
+        std::string mems;
+        for (const auto& m : members) mems += " " + m;
+        AOFLogger::log("SADD " + key + mems);
+    }
+    return success;
+}
+
+bool EnhancedDB::srem(const std::string& key, const std::vector<std::string>& members) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::srem(storage_, key, members);
+    if (success) {
+        sync_to_cache(key);
+        std::string mems;
+        for (const auto& m : members) mems += " " + m;
+        AOFLogger::log("SREM " + key + mems);
+    }
+    return success;
+}
+
+bool EnhancedDB::smembers(const std::string& key, std::set<std::string>& members) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::smembers(storage_, key, members);
+}
+
+bool EnhancedDB::scard(const std::string& key, size_t& count) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::scard(storage_, key, count);
+}
+
+bool EnhancedDB::sismember(const std::string& key, const std::string& member) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::sismember(storage_, key, member);
+}
+
+bool EnhancedDB::hset(const std::string& key, const std::string& field, const std::string& value) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::hset(storage_, key, field, value);
+    if (success) {
+        sync_to_cache(key);
+        AOFLogger::log("HSET " + key + " " + field + " " + value);
+    }
+    return success;
+}
+
+bool EnhancedDB::hget(const std::string& key, const std::string& field, std::string& value) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::hget(storage_, key, field, value);
+}
+
+bool EnhancedDB::hdel(const std::string& key, const std::vector<std::string>& fields) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    bool success = DataOperations::hdel(storage_, key, fields);
+    if (success) {
+        sync_to_cache(key);
+        std::string flds;
+        for (const auto& f : fields) flds += " " + f;
+        AOFLogger::log("HDEL " + key + flds);
+    }
+    return success;
+}
+
+bool EnhancedDB::hgetall(const std::string& key, std::unordered_map<std::string, std::string>& result) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::hgetall(storage_, key, result);
+}
+
+bool EnhancedDB::hkeys(const std::string& key, std::vector<std::string>& fields) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::hkeys(storage_, key, fields);
+}
+
+bool EnhancedDB::hvals(const std::string& key, std::vector<std::string>& values) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::hvals(storage_, key, values);
+}
+
+void EnhancedDB::del(const std::string& key) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    cache_->erase(key);
+    storage_.erase(key);
+    AOFLogger::log("DEL " + key);
+}
+
+bool EnhancedDB::exists(const std::string& key) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    return cache_->exists(key) || storage_.find(key) != storage_.end();
+}
+
+DataType EnhancedDB::type(const std::string& key) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::type(storage_, key);
+}
+
+std::vector<std::string> EnhancedDB::keys(const std::string& pattern) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return DataOperations::keys(storage_, pattern);
+}
+
+void EnhancedDB::save(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    nlohmann::json j;
+    for (const auto& item : storage_) {
+        j[item.first] = item.second.to_json();
+    }
+    std::ofstream file(filename);
+    file << j.dump();
+}
+
+void EnhancedDB::load(const std::string& filename) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    std::ifstream file(filename);
+    if (!file.is_open()) return;
+    
+    nlohmann::json j;
+    file >> j;
+    
+    storage_.clear();
+    cache_->clear();
+    
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        DataValue value = DataValue::from_json(it.value());
+        storage_[it.key()] = value;
+        cache_->put(it.key(), value);
+    }
+}
+
+void EnhancedDB::expire(const std::string& key, int seconds) {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    cache_->set_expiry(key, seconds);
+}
+
+void EnhancedDB::flushdb() {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    storage_.clear();
+    cache_->clear();
+    AOFLogger::log("FLUSHDB");
+}
+
+size_t EnhancedDB::dbsize() {
+    std::lock_guard<std::mutex> lock(db_mutex);
+    sync_from_cache();
+    return storage_.size();
+}
+
+size_t EnhancedDB::get_hits() const {
+    return cache_->get_hits();
+}
+
+size_t EnhancedDB::get_misses() const {
+    return cache_->get_misses();
+}
+
+void EnhancedDB::sync_to_cache(const std::string& key) {
+    auto it = storage_.find(key);
+    if (it != storage_.end()) {
+        cache_->put(key, it->second);
+    }
+}
+
+void EnhancedDB::sync_from_cache() {
+    // For now, we keep storage_ as the primary source
+    // In a more sophisticated implementation, we could sync cache data back to storage
+}
+
+EnhancedDB::~EnhancedDB() {
+    delete cache_;
+}
+
+// LRUDB method implementations (unchanged)
 LRUDB::LRUDB(size_t capacity) : cache_(new LRUCache(capacity)) {
     AOFLogger::replay(this);
-    AOFLogger::clear(); // Clear AOF after replaying on startup
 }
 void LRUDB::set(const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(db_mutex);
@@ -88,148 +348,31 @@ void LRUDB::del(const std::string& key) {
 void LRUDB::save(const std::string& filename) {
     std::lock_guard<std::mutex> lock(db_mutex);
     nlohmann::json j;
-    
-    // Save string data
     for (const auto& item : cache_->get_items()) {
-        j["data"][item.first] = encrypt_data(item.second, get_encryption_key());
+        j[item.first] = item.second;
     }
-    
-    // Save list data
-    for (const auto& [key, list] : lists_) {
-        j["lists"][key] = list;
-    }
-    
-    // Save HLL data
-    for (const auto& [key, hll] : hlls_) {
-        std::vector<int> registers_int(hll.get_registers().begin(), hll.get_registers().end());
-        nlohmann::json hll_registers_json = registers_int;
-        j["hlls"][key] = hll_registers_json;
-    }
-    
-    std::string json_str = j.dump();
-    std::string encrypted_data = encrypt_data(json_str, get_encryption_key());
-    
-    // Save to main file
-    std::ofstream file(filename, std::ios::binary);
-    file << encrypted_data;
-
-    // Create incremental backup
-    auto now = std::chrono::system_clock::now();
-    auto in_time_t = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << filename << ".backup_" << std::put_time(std::localtime(&in_time_t), "%Y%m%d_%H%M%S");
-    std::ofstream backup_file(ss.str(), std::ios::binary);
-    backup_file << encrypted_data;
+    std::ofstream file(filename);
+    file << j.dump();
 }
 void LRUDB::load(const std::string& filename) {
     std::lock_guard<std::mutex> lock(db_mutex);
-    std::ifstream file(filename, std::ios::binary);
-    if (file) {
-        std::string encrypted_data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        std::string decrypted_data = decrypt_data(encrypted_data, get_encryption_key());
-        nlohmann::json j = nlohmann::json::parse(decrypted_data);
-        
-        // Load string data
-        if (j.contains("data")) {
-            for (auto it = j["data"].begin(); it != j["data"].end(); ++it) {
-                cache_->put(it.key(), decrypt_data(it.value().get<std::string>(), get_encryption_key()));
-            }
-        }
-        
-        // Load list data
-        if (j.contains("lists")) {
-            for (auto it = j["lists"].begin(); it != j["lists"].end(); ++it) {
-                for (const auto& item : it.value()) {
-                    lists_[it.key()].push_back(item.get<std::string>());
-                }
-            }
-        }
-
-        // Load HLL data
-        if (j.contains("hlls")) {
-            for (auto it = j["hlls"].begin(); it != j["hlls"].end(); ++it) {
-                std::string key = it.key();
-                nlohmann::json hll_registers_json = it.value();
-                unsigned int precision = 16; // Default precision, assuming it's consistent
-                if (hll_registers_json.is_array() && !hll_registers_json.empty()) {
-                    HyperLogLog hll(precision);
-                    std::vector<unsigned char> loaded_registers;
-                    for (const auto& reg_val : hll_registers_json) {
-                        loaded_registers.push_back(reg_val.get<unsigned char>());
-                    }
-                    hll.set_registers(loaded_registers);
-                    hlls_[key] = hll;
-                }
-            }
-        }
+    std::ifstream file(filename);
+    nlohmann::json j;
+    file >> j;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        cache_->put(it.key(), it.value());
     }
 }
 void LRUDB::expire(const std::string& key, int seconds) {
     std::lock_guard<std::mutex> lock(db_mutex);
     cache_->set_expiry(key, seconds);
 }
-void LRUDB::lpush(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    lists_[key].push_front(value);
-    // No cache interaction here for lists, as they are a separate data type
-    // If you want cache to track list keys, consider adding them to the cache with a dummy value.
-}
-void LRUDB::rpush(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    lists_[key].push_back(value);
-}
-bool LRUDB::lpop(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    if (it != lists_.end() && !it->second.empty()) {
-        value = it->second.front();
-        it->second.pop_front();
-        if (it->second.empty()) lists_.erase(it);
-        return true;
-    }
-    return false;
-}
-bool LRUDB::rpop(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    if (it != lists_.end() && !it->second.empty()) {
-        value = it->second.back();
-        it->second.pop_back();
-        if (it->second.empty()) lists_.erase(it);
-        return true;
-    }
-    return false;
-}
-size_t LRUDB::llen(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    return it != lists_.end() ? it->second.size() : 0;
-}
-
-void LRUDB::hll_add(const std::string& key, const std::string& element) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    hlls_[key].add(element);
-    AOFLogger::log("HLL.ADD " + key + " " + element);
-}
-
-long long LRUDB::hll_count(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = hlls_.find(key);
-    if (it != hlls_.end()) {
-        return it->second.count();
-    }
-    return 0;
-}
 
 // LFUDB method implementations
-LFUDB::LFUDB(size_t capacity) : cache_(new LFUCache(capacity)) {
-    AOFLogger::replay(this);
-    AOFLogger::clear(); // Clear AOF after replaying on startup
-}
+LFUDB::LFUDB(size_t capacity) : cache_(new LFUCache(capacity)) {}
 void LFUDB::set(const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(db_mutex);
     cache_->put(key, value);
-    AOFLogger::log("SET " + key + " " + value);
 }
 bool LFUDB::get(const std::string& key, std::string& value) {
     std::lock_guard<std::mutex> lock(db_mutex);
@@ -238,85 +381,23 @@ bool LFUDB::get(const std::string& key, std::string& value) {
 void LFUDB::del(const std::string& key) {
     std::lock_guard<std::mutex> lock(db_mutex);
     cache_->erase(key);
-    AOFLogger::log("DEL " + key);
 }
 void LFUDB::save(const std::string& filename) {
     std::lock_guard<std::mutex> lock(db_mutex);
     nlohmann::json j;
-    
-    // Save string data
     for (const auto& item : cache_->get_items()) {
-        j["data"][item.first] = encrypt_data(item.second, get_encryption_key());
+        j[item.first] = item.second;
     }
-    
-    // Save list data
-    for (const auto& [key, list] : lists_) {
-        j["lists"][key] = list;
-    }
-
-    // Save HLL data
-    for (const auto& [key, hll] : hlls_) {
-        std::vector<int> registers_int(hll.get_registers().begin(), hll.get_registers().end());
-        nlohmann::json hll_registers_json = registers_int;
-        j["hlls"][key] = hll_registers_json;
-    }
-    
-    std::string json_str = j.dump();
-    std::string encrypted_data = encrypt_data(json_str, get_encryption_key());
-    
-    // Save to main file
-    std::ofstream file(filename, std::ios::binary);
-    file << encrypted_data;
-
-    // Create incremental backup
-    auto now = std::chrono::system_clock::now();
-    auto in_time_t = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << filename << ".backup_" << std::put_time(std::localtime(&in_time_t), "%Y%m%d_%H%M%S");
-    std::ofstream backup_file(ss.str(), std::ios::binary);
-    backup_file << encrypted_data;
+    std::ofstream file(filename);
+    file << j.dump();
 }
 void LFUDB::load(const std::string& filename) {
     std::lock_guard<std::mutex> lock(db_mutex);
-    std::ifstream file(filename, std::ios::binary);
-    if (file) {
-        std::string encrypted_data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        std::string decrypted_data = decrypt_data(encrypted_data, get_encryption_key());
-        nlohmann::json j = nlohmann::json::parse(decrypted_data);
-
-        // Load string data
-        if (j.contains("data")) {
-            for (auto it = j["data"].begin(); it != j["data"].end(); ++it) {
-                cache_->put(it.key(), decrypt_data(it.value().get<std::string>(), get_encryption_key()));
-            }
-        }
-
-        // Load list data
-        if (j.contains("lists")) {
-            for (auto it = j["lists"].begin(); it != j["lists"].end(); ++it) {
-                for (const auto& item : it.value()) {
-                    lists_[it.key()].push_back(item.get<std::string>());
-                }
-            }
-        }
-
-        // Load HLL data
-        if (j.contains("hlls")) {
-            for (auto it = j["hlls"].begin(); it != j["hlls"].end(); ++it) {
-                std::string key = it.key();
-                nlohmann::json hll_registers_json = it.value();
-                unsigned int precision = 16; // Default precision, assuming it's consistent
-                if (hll_registers_json.is_array() && !hll_registers_json.empty()) {
-                    HyperLogLog hll(precision);
-                    std::vector<unsigned char> loaded_registers;
-                    for (const auto& reg_val : hll_registers_json) {
-                        loaded_registers.push_back(reg_val.get<unsigned char>());
-                    }
-                    hll.set_registers(loaded_registers);
-                    hlls_[key] = hll;
-                }
-            }
-        }
+    std::ifstream file(filename);
+    nlohmann::json j;
+    file >> j;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        cache_->put(it.key(), it.value());
     }
 }
 void LFUDB::expire(const std::string& key, int seconds) {
@@ -325,230 +406,9 @@ void LFUDB::expire(const std::string& key, int seconds) {
 }
 LFUDB::~LFUDB() { delete cache_; }
 
-void LFUDB::hll_add(const std::string& key, const std::string& element) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    hlls_[key].add(element);
-    AOFLogger::log("HLL.ADD " + key + " " + element);
-}
-
-long long LFUDB::hll_count(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = hlls_.find(key);
-    if (it != hlls_.end()) {
-        return it->second.count();
-    }
-    return 0;
-}
-
-void LFUDB::lpush(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    lists_[key].push_front(value);
-}
-
-void LFUDB::rpush(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    lists_[key].push_back(value);
-}
-
-bool LFUDB::lpop(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    if (it != lists_.end() && !it->second.empty()) {
-        value = it->second.front();
-        it->second.pop_front();
-        if (it->second.empty()) lists_.erase(it);
-        return true;
-    }
-    return false;
-}
-
-bool LFUDB::rpop(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    if (it != lists_.end() && !it->second.empty()) {
-        value = it->second.back();
-        it->second.pop_back();
-        if (it->second.empty()) lists_.erase(it);
-        return true;
-    }
-    return false;
-}
-
-size_t LFUDB::llen(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    return it != lists_.end() ? it->second.size() : 0;
-}
-
 // Factory function
 DB* create_db(const std::string& policy, size_t capacity) {
+    if (policy == "ENHANCED") return new EnhancedDB(capacity);
     if (policy == "LFU") return new LFUDB(capacity);
-    if (policy == "ARC") return new ARCDB(capacity);
     return new LRUDB(capacity);
 }
-
-// ARCDB method implementations
-ARCDB::ARCDB(size_t capacity) : cache_(new ARCCache(capacity)) {
-    AOFLogger::replay(this);
-    AOFLogger::clear(); // Clear AOF after replaying on startup
-}
-
-void ARCDB::set(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    cache_->put(key, value);
-    AOFLogger::log("SET " + key + " " + value);
-}
-
-bool ARCDB::get(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    return cache_->get(key, value);
-}
-
-void ARCDB::del(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    cache_->erase(key);
-    AOFLogger::log("DEL " + key);
-}
-
-void ARCDB::save(const std::string& filename) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    nlohmann::json j;
-    
-    // Save string data
-    for (const auto& item : cache_->get_items()) {
-        j["data"][item.first] = encrypt_data(item.second, get_encryption_key());
-    }
-    
-    // Save list data
-    for (const auto& [key, list] : lists_) {
-        j["lists"][key] = list;
-    }
-
-    // Save HLL data
-    for (const auto& [key, hll] : hlls_) {
-        std::vector<int> registers_int(hll.get_registers().begin(), hll.get_registers().end());
-        nlohmann::json hll_registers_json = registers_int;
-        j["hlls"][key] = hll_registers_json;
-    }
-    
-    std::string json_str = j.dump();
-    std::string encrypted_data = encrypt_data(json_str, get_encryption_key());
-    
-    // Save to main file
-    std::ofstream file(filename, std::ios::binary);
-    file << encrypted_data;
-
-    // Create incremental backup
-    auto now = std::chrono::system_clock::now();
-    auto in_time_t = std::chrono::system_clock::to_time_t(now);
-    std::stringstream ss;
-    ss << filename << ".backup_" << std::put_time(std::localtime(&in_time_t), "%Y%m%d_%H%M%S");
-    std::ofstream backup_file(ss.str(), std::ios::binary);
-    backup_file << encrypted_data;
-}
-
-void ARCDB::load(const std::string& filename) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    std::ifstream file(filename, std::ios::binary);
-    if (file) {
-        std::string encrypted_data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        std::string decrypted_data = decrypt_data(encrypted_data, get_encryption_key());
-        nlohmann::json j = nlohmann::json::parse(decrypted_data);
-
-        // Load string data
-        if (j.contains("data")) {
-            for (auto it = j["data"].begin(); it != j["data"].end(); ++it) {
-                cache_->put(it.key(), decrypt_data(it.value().get<std::string>(), get_encryption_key()));
-            }
-        }
-
-        // Load list data
-        if (j.contains("lists")) {
-            for (auto it = j["lists"].begin(); it != j["lists"].end(); ++it) {
-                for (const auto& item : it.value()) {
-                    lists_[it.key()].push_back(item.get<std::string>());
-                }
-            }
-        }
-
-        // Load HLL data
-        if (j.contains("hlls")) {
-            for (auto it = j["hlls"].begin(); it != j["hlls"].end(); ++it) {
-                std::string key = it.key();
-                nlohmann::json hll_registers_json = it.value();
-                unsigned int precision = 16; // Default precision, assuming it's consistent
-                if (hll_registers_json.is_array() && !hll_registers_json.empty()) {
-                    HyperLogLog hll(precision);
-                    std::vector<unsigned char> loaded_registers;
-                    for (const auto& reg_val : hll_registers_json) {
-                        loaded_registers.push_back(reg_val.get<unsigned char>());
-                    }
-                    hll.set_registers(loaded_registers);
-                    hlls_[key] = hll;
-                }
-            }
-        }
-    }
-}
-
-void ARCDB::expire(const std::string& key, int seconds) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    cache_->set_expiry(key, seconds);
-}
-
-void ARCDB::lpush(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    lists_[key].push_front(value);
-}
-
-void ARCDB::rpush(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    lists_[key].push_back(value);
-}
-
-bool ARCDB::lpop(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    if (it != lists_.end() && !it->second.empty()) {
-        value = it->second.front();
-        it->second.pop_front();
-        if (it->second.empty()) lists_.erase(it);
-        return true;
-    }
-    return false;
-}
-
-bool ARCDB::rpop(const std::string& key, std::string& value) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    if (it != lists_.end() && !it->second.empty()) {
-        value = it->second.back();
-        it->second.pop_back();
-        if (it->second.empty()) lists_.erase(it);
-        return true;
-    }
-    return false;
-}
-
-size_t ARCDB::llen(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = lists_.find(key);
-    return it != lists_.end() ? it->second.size() : 0;
-}
-
-void ARCDB::hll_add(const std::string& key, const std::string& element) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    hlls_[key].add(element);
-    AOFLogger::log("HLL.ADD " + key + " " + element);
-}
-
-long long ARCDB::hll_count(const std::string& key) {
-    std::lock_guard<std::mutex> lock(db_mutex);
-    auto it = hlls_.find(key);
-    if (it != hlls_.end()) {
-        return it->second.count();
-    }
-    return 0;
-}
-
-ARCDB::~ARCDB() { delete cache_; }

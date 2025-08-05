@@ -1,6 +1,5 @@
 #include "lfu_cache.h"
 #include <algorithm>
-#include <chrono>
 
 LFUCache::LFUCache(size_t capacity) : capacity_(capacity) {}
 
@@ -22,12 +21,10 @@ void LFUCache::put(const std::string& key, const std::string& value) {
         std::string evict_key = freq_list_[min_freq].front();
         freq_list_[min_freq].pop_front();
         erase(evict_key);
-        eviction_count_++;
     }
 }
 
 bool LFUCache::get(const std::string& key, std::string& value) {
-    auto start_time = std::chrono::high_resolution_clock::now();
     auto it = map_.find(key);
     if (it == map_.end()) { misses_++; return false; }
     auto eit = expiry_.find(key);
@@ -35,14 +32,11 @@ bool LFUCache::get(const std::string& key, std::string& value) {
         erase(key);
         expiry_.erase(key);
         misses_++;
-        eviction_count_++;
         return false;
     }
     update_freq(key);
     value = it->second->second;
     hits_++;
-    auto end_time = std::chrono::high_resolution_clock::now();
-    total_hit_latency_ms_ += std::chrono::duration<double, std::milli>(end_time - start_time).count();
     return true;
 }
 
